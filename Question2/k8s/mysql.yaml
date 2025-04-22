@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: asiayo
+data:
+  master.cnf: |
+    [mysqld]
+    server-id=1
+    log-bin=mysql-bin
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    binlog_format=ROW
+
+  replica.cnf: |
+    [mysqld]
+    server-id=2
+    relay-log=mysqld-relay-bin
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    binlog_format=ROW
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: asiayo
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-primary
+  namespace: asiayo
+spec:
+  serviceName: "mysql"
+  replicas: 1
+  selector:
+    matchLabels:
+      role: primary
+      app: mysql
+  template:
+    metadata:
+      labels:
+        role: primary
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: rootpass
+        volumeMounts:
+        - name: config
+          mountPath: /etc/mysql/conf.d
+        - name: data
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: config
+        configMap:
+          name: mysql-config
+          items:
+            - key: master.cnf
+              path: master.cnf
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-replica
+  namespace: asiayo
+spec:
+  serviceName: "mysql"
+  replicas: 1
+  selector:
+    matchLabels:
+      role: replica
+      app: mysql
+  template:
+    metadata:
+      labels:
+        role: replica
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: rootpass
+        command:
+          - sh
+          - -c
+          - |
+            sleep 15
+            mysqld &
+            sleep 15
+            mysql -h mysql-primary-0.mysql.asiayo.svc.cluster.local -uroot -prootpass -e "
+              CHANGE REPLICATION SOURCE TO 
+                SOURCE_HOST='mysql-primary-0.mysql.asiayo.svc.cluster.local',
+                SOURCE_USER='root',
+                SOURCE_PASSWORD='rootpass',
+                GET_SOURCE_PUBLIC_KEY=1,
+                SOURCE_AUTO_POSITION=1;
+              START REPLICA;"
+            wait
+        volumeMounts:
+        - name: config
+          mountPath: /etc/mysql/conf.d
+        - name: data
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: config
+        configMap:
+          name: mysql-config
+          items:
+            - key: replica.cnf
+              path: replica.cnf
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
